@@ -446,6 +446,36 @@
   }
   .cell.shuffling { animation:cellPop 0.65s cubic-bezier(0.4,0,0.2,1) both; }
 
+  /* ── PROMOTION CHOICES ── */
+  .promo-btn {
+    background: linear-gradient(145deg, rgba(201,168,76,0.08), rgba(201,168,76,0.18));
+    border: 2px solid rgba(201,168,76,0.3);
+    border-radius: 6px; padding: 10px 8px; cursor: pointer;
+    transition: all 0.2s; display:flex; flex-direction:column; align-items:center; gap:5px;
+    min-width: 72px;
+  }
+  .promo-btn:hover {
+    border-color: var(--gold); background: rgba(201,168,76,0.25);
+    transform: translateY(-3px); box-shadow: 0 0 14px rgba(201,168,76,0.35);
+  }
+  .promo-btn svg { width:44px; height:44px; filter:drop-shadow(0 2px 4px rgba(0,0,0,0.7)); }
+  .promo-btn span { font-family:'Cinzel Decorative',serif; font-size:0.5rem; letter-spacing:0.08em; color:var(--gold); }
+
+  /* ── JAQUE: King in check glow ── */
+  .cell.in-check {
+    background: rgba(192,40,40,0.55) !important;
+    box-shadow: inset 0 0 0 3px #ff4444, 0 0 18px rgba(255,60,60,0.7) !important;
+    z-index: 2;
+    animation: checkPulse 0.9s ease-in-out infinite alternate;
+  }
+  @keyframes checkPulse {
+    from { box-shadow: inset 0 0 0 3px #ff4444, 0 0 12px rgba(255,60,60,0.6); }
+    to   { box-shadow: inset 0 0 0 3px #ff9999, 0 0 28px rgba(255,80,80,0.9); }
+  }
+  .cell.in-check .piece svg {
+    filter: drop-shadow(0 0 8px #ff4444) drop-shadow(0 2px 4px rgba(0,0,0,0.8));
+  }
+
 </style>
 </head>
 <body>
@@ -618,6 +648,16 @@
       <button class="btn-confirm-yes" onclick="doRestart()">Sí, reiniciar</button>
       <button class="btn-confirm-no" onclick="closeConfirm()">Cancelar</button>
     </div>
+  </div>
+</div>
+
+<!-- PROMOTION MODAL -->
+<div id="promotion-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:150;align-items:center;justify-content:center;backdrop-filter:blur(6px)">
+  <div style="background:var(--modal-bg);border:1px solid rgba(201,168,76,0.45);border-radius:8px;padding:32px 36px;text-align:center;box-shadow:0 0 60px rgba(201,168,76,0.15);animation:modalIn 0.3s ease;position:relative;">
+    <div style="position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent)"></div>
+    <div style="font-family:'Cinzel Decorative',serif;color:var(--gold);font-size:0.85rem;letter-spacing:0.15em;margin-bottom:6px;">✦ CORONACIÓN</div>
+    <p style="color:var(--text-silver);font-style:italic;font-size:0.9rem;margin-bottom:20px;">Elige la pieza a la que coronar tu Peón</p>
+    <div id="promotion-choices" style="display:flex;gap:14px;justify-content:center;"></div>
   </div>
 </div>
 
@@ -1006,6 +1046,8 @@ let capturedPieces={white:[],black:[]}, mana={white:3,black:3}, frozenCells={};
 let lastMove=null, moveCount=1, activeSpell=null, spellStep=0, spellData={}, gameOver=false;
 // Castling rights: track if king/rooks have moved
 let castlingRights = { wK:true, wRa:true, wRh:true, bK:true, bRa:true, bRh:true };
+// Pending promotion
+let pendingPromotion = null; // {r, c, own}
 
 function initBoard() {
   board = Array(8).fill(null).map(()=>Array(8).fill(null));
@@ -1047,6 +1089,21 @@ function renderBoard(){
     if(board[r][c]){const d=document.createElement('div');d.className='piece';d.innerHTML=getPieceSVG(board[r][c]);cell.appendChild(d);}
     cell.addEventListener('click',()=>onCellClick(r,c));
     cb.appendChild(cell);
+  }
+
+  // ── Highlight king in check
+  const cpOwn = currentPlayer[0];
+  const cpEnemy = cpOwn==='w'?'b':'w';
+  for(let rr=0;rr<8;rr++) for(let cc=0;cc<8;cc++){
+    if(board[rr][cc]===cpOwn+'K'){
+      if(isAttackedBy(rr,cc,cpEnemy)){
+        const idx2=rr*8+cc;
+        cb.children[idx2] && cb.children[idx2].classList.add('in-check');
+        // Also show in status bar
+        document.getElementById('status-msg').textContent =
+          `⚠ ¡JAQUE! ${currentPlayer==='white'?'Rey blanco':'Rey negro'} en peligro`;
+      }
+    }
   }
 }
 
@@ -1161,6 +1218,9 @@ function executeMove(fr,fc,tr,tc,castleType){
       mana[currentPlayer]=Math.min(10,mana[currentPlayer]+(MANA_GAIN[target[1]]||1));
       addLog(`¡${pn(piece)} captura ${pn(target)} en ${cn(tr,tc)}!`,currentPlayer,'capture');
       if(target[1]==='K'){gameOver=true;setTimeout(()=>showVictory(currentPlayer),400);}
+      // Clear necro glow when piece is captured
+      necroConverted.delete(tr+','+tc);
+      necroPawns.delete(tr+','+tc);
       // Revoke castling rights if enemy rook captured
       if(target[1]==='R'){
         if(tr===(enemy==='w'?7:0)&&tc===0){const rk=enemy==='w'?'wRa':'bRa';castlingRights[rk]=false;}
@@ -1201,11 +1261,14 @@ function executeMove(fr,fc,tr,tc,castleType){
   }
   if(necroConverted.has(fr+','+fc)){necroConverted.delete(fr+','+fc);necroConverted.add(tr+','+tc);}
 
-  // Pawn promotion (necro pawn promotes too, loses necro status)
+  // Pawn promotion — show choice modal
   if(type==='P'&&((own==='w'&&tr===0)||(own==='b'&&tr===7))){
-    board[tr][tc]=own+'Q';
-    necroPawns.delete(tr+','+tc); // promoted, no longer a pawn
-    addLog(`✨ ¡Peón coronado como Reina!`,currentPlayer,'special');
+    necroPawns.delete(tr+','+tc);
+    pendingPromotion={r:tr,c:tc,own};
+    // Pause the turn switch, wait for player choice
+    renderBoard(); updateMana(); updateCapturedDisplay();
+    showPromotionModal(own);
+    return; // DO NOT switchTurn yet
   }
 
   const nf={};for(const k in frozenCells){frozenCells[k]--;if(frozenCells[k]>0)nf[k]=frozenCells[k];}frozenCells=nf;
@@ -1225,7 +1288,7 @@ function activateSpell(spell,player){
   activeSpell=spell;spellStep=0;spellData={player};
   document.querySelectorAll('.spell-btn').forEach(b=>b.classList.remove('active'));
   document.querySelectorAll(`[data-spell="${spell}"][data-player="${player}"]`).forEach(b=>b.classList.add('active'));
-  const inst={teleport:'✨ Selecciona tu pieza a teletransportar',freeze:'❄️ Selecciona pieza enemiga a congelar',revive:'💀 Click en casilla vacía para revivir peón',necro:'💀 Selecciona el Peón que deseas encantar como Nigromante'};
+  const inst={teleport:'✨ Selecciona tu pieza a teletransportar',freeze:'❄️ Selecciona pieza enemiga a congelar',revive:'💀 Selecciona una casilla vacía para invocar un peón (no fila 1 ni 8)',necro:'💀 Selecciona el Peón que deseas encantar como Nigromante'};
   document.getElementById('status-msg').textContent=inst[spell];
 }
 function cancelSpell(){activeSpell=null;spellStep=0;spellData={};document.querySelectorAll('.spell-btn').forEach(b=>b.classList.remove('active'));updateUI();}
@@ -1237,8 +1300,23 @@ function handleSpellClick(r,c){
   }else if(activeSpell==='freeze'){
     if(board[r][c]?.[0]===enemy){frozenCells[r+','+c]=2;mana[player]-=cost;addLog(`❄️ ${pn(board[r][c])} congelada en ${cn(r,c)}. ¡Ahora mueve una pieza!`,player,'special');flashCell(r,c);cancelSpell();document.getElementById('status-msg').textContent='❄️ Pieza congelada — ahora realiza tu movimiento';}
   }else if(activeSpell==='revive'){
-    if(!board[r][c]&&capturedPieces[player].some(p=>p[1]==='P')){const idx=capturedPieces[player].findLastIndex(p=>p[1]==='P');if(idx!==-1){board[r][c]=capturedPieces[player][idx];capturedPieces[player].splice(idx,1);mana[player]-=cost;addLog(`💀 Peón revivido en ${cn(r,c)}!`,player,'special');flashCell(r,c);cancelSpell();switchTurn();}}
-    else if(!board[r][c]) addLog('No hay peones capturados para revivir.',player,'special');
+    const ownPawn = own + 'P';
+    // Count own pawns currently on the board
+    let pawnCount = 0;
+    for(let rr=0;rr<8;rr++) for(let cc=0;cc<8;cc++) if(board[rr][cc]===ownPawn) pawnCount++;
+
+    if(board[r][c]) {
+      // clicked on an occupied cell — ignore silently
+    } else if(r === 0 || r === 7) {
+      addLog(`No puedes colocar un peón en la fila ${r===7?1:8}.`, player, 'special');
+    } else if(pawnCount >= 8) {
+      addLog('Ya tienes 8 peones en el tablero. No puedes revivir más.', player, 'special');
+    } else {
+      board[r][c] = ownPawn;
+      mana[player] -= cost;
+      addLog(`💀 Peón ${player==='white'?'blanco':'negro'} invocado en ${cn(r,c)}!`, player, 'special');
+      flashCell(r,c); cancelSpell(); switchTurn();
+    }
   }else if(activeSpell==='necro'){
     // Only step: pick one of your pawns to enchant
     if(board[r][c]?.[0]===own && board[r][c]?.[1]==='P'){
@@ -1272,13 +1350,55 @@ function updateUI(){
   document.getElementById('turn-black').style.borderColor=!w?'rgba(201,168,76,0.5)':'rgba(201,168,76,0.1)';
   document.getElementById('move-count').textContent=`Turno ${moveCount}`;
   document.getElementById('status-msg').textContent=currentPlayer==='white'?'Selecciona una pieza blanca':'Selecciona una pieza negra';
-  for(const player of['white','black'])document.querySelectorAll(`[data-player="${player}"]`).forEach(btn=>{const spell=btn.dataset.spell;if(spell)btn.disabled=(player!==currentPlayer)||(mana[player]<SPELL_COSTS[spell]);});
+  for(const player of['white','black']){
+    const own = player[0];
+    const ownPawn = own+'P';
+    let pawnCount=0;
+    for(let rr=0;rr<8;rr++) for(let cc=0;cc<8;cc++) if(board[rr][cc]===ownPawn) pawnCount++;
+    document.querySelectorAll(`[data-player="${player}"]`).forEach(btn=>{
+      const spell=btn.dataset.spell;
+      if(!spell) return;
+      let disabled = (player!==currentPlayer)||(mana[player]<SPELL_COSTS[spell]);
+      if(spell==='revive' && pawnCount>=8) disabled=true;
+      btn.disabled=disabled;
+    });
+  }
 }
 function updateMana(){document.getElementById('mana-white').style.width=Math.min(100,(mana.white/10)*100)+'%';document.getElementById('mana-black').style.width=Math.min(100,(mana.black/10)*100)+'%';}
 function updateCapturedDisplay(){
   ['white','black'].forEach(p=>{document.getElementById('captured-'+p).innerHTML=capturedPieces[p].map(pc=>`<span style="width:26px;height:26px;display:inline-flex;align-items:center">${getPieceSVG(pc).replace('<svg viewBox="0 0 50 50"','<svg viewBox="0 0 50 50" width="24" height="24"')}</span>`).join('');});
 }
 function addLog(text,player,type=''){const log=document.getElementById('log-'+player);const e=document.createElement('div');e.className='log-entry'+(type?' '+type:'');e.textContent=text;log.insertBefore(e,log.firstChild);if(log.children.length>30)log.removeChild(log.lastChild);}
+// ── PROMOTION MODAL
+function showPromotionModal(own){
+  const overlay = document.getElementById('promotion-overlay');
+  overlay.style.display = 'flex';
+  const choices = document.getElementById('promotion-choices');
+  choices.innerHTML = '';
+  const pieces = ['Q','R','B','N'];
+  const names  = {Q:'Reina', R:'Torre', B:'Alfil', N:'Caballo'};
+  pieces.forEach(type => {
+    const btn = document.createElement('button');
+    btn.className = 'promo-btn';
+    btn.innerHTML = `${getPieceSVG(own+type)}<span>${names[type]}</span>`;
+    btn.onclick = () => applyPromotion(own+type);
+    choices.appendChild(btn);
+  });
+}
+
+function applyPromotion(pieceCode){
+  document.getElementById('promotion-overlay').style.display='none';
+  if(!pendingPromotion) return;
+  const {r,c,own} = pendingPromotion;
+  board[r][c] = pieceCode;
+  pendingPromotion = null;
+  addLog(`✨ ¡Peón coronado como ${pn(pieceCode).slice(2)}!`, currentPlayer, 'special');
+  // Now complete the turn
+  const nf={};for(const k in frozenCells){frozenCells[k]--;if(frozenCells[k]>0)nf[k]=frozenCells[k];}frozenCells=nf;
+  selectedCell=null;validMoves=[];mana[currentPlayer]=Math.min(10,mana[currentPlayer]+0.5);
+  if(!gameOver) switchTurn(); else {renderBoard();updateMana();updateCapturedDisplay();}
+}
+
 function showVictory(winner){document.getElementById('modal-icon').textContent=winner==='white'?'☀️':'🌑';document.getElementById('modal-title').textContent='¡'+(winner==='white'?'Luz':'Sombra')+' Triunfa!';document.getElementById('modal-text').textContent=`El Reino de ${winner==='white'?'la Luz':'las Sombras'} ha derrocado al rey en el turno ${moveCount}.`;document.getElementById('overlay').classList.add('show');}
 function cn(r,c){return 'abcdefgh'[c]+(8-r);}
 function pn(code){if(!code)return'?';const names={K:'Rey',Q:'Reina',R:'Torre',B:'Alfil',N:'Caballo',P:'Peón'};return(code[0]==='w'?'⬜':'⬛')+names[code[1]];}
